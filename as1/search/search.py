@@ -18,6 +18,7 @@ Pacman agents (in searchAgents.py).
 """
 
 import util
+from game import Directions
 
 class SearchProblem:
     """
@@ -61,6 +62,18 @@ class SearchProblem:
         """
         util.raiseNotDefined()
 
+def strToDir(string):
+    match string:
+        case 'North':
+            return Directions.NORTH
+        case 'South':
+            return Directions.SOUTH
+        case 'East':
+            return Directions.EAST
+        case 'West':
+            return Directions.WEST
+
+        
 
 def tinyMazeSearch(problem):
     """
@@ -87,6 +100,22 @@ def depthFirstSearch(problem):
     print("Start's successors:", problem.getSuccessors(problem.getStartState()))
     """
     "*** YOUR CODE HERE ***"
+    # print("Start:", problem.getStartState())
+    # print("Is the start a goal?", problem.isGoalState((4,5)))
+    # print("Start's successors:", problem.getSuccessors(problem.getStartState()), problem.getSuccessors((4,5)))
+    #
+    if(problem.isGoalState(problem.getStartState())):
+        return []
+
+    s = util.Stack()
+    currDir = util.Stack()
+    s.push((problem.getStartState()))
+
+    visited = set()
+    while not s.isEmpty():
+        for successor in problem.getSuccessors(s.pop()):
+            if problem.isGoalState(successor):
+
 
     util.raiseNotDefined()
 
