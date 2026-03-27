@@ -1,4 +1,5 @@
 #include <array>
+#include <fstream>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -153,13 +154,42 @@ Clause parseClause(const string &line) {
   return clause;
 }
 
+/**
+ * IO OPS
+ */
+
+// each line is a clause
+vector<string> readLines(const string &filename) {
+  ifstream fin(filename);
+  if (!fin) {
+    throw runtime_error("Could not open file: " + filename);
+  }
+
+  vector<string> lines;
+  string line;
+  while (getline(fin, line)) {
+    if (!line.empty()) {
+      lines.push_back(line);
+    }
+  }
+  return lines;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     cerr << "You must input a file name" << endl;
     return 1;
   }
-  Clause c = parseClause("~p q q ¬r");
-  cout << c.toString() << "\n";
+
+  KnowledgeBase kb;
+  vector<string> lines = readLines(argv[1]);
+
+  for (int i = 0; i + 1 < lines.size(); i++) {
+    Clause clause = parseClause(lines[i]);
+    kb.addClause(clause);
+  }
+  Clause query = parseClause(lines.back());
+  kb.print();
 
   return 0;
 }
