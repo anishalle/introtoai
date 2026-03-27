@@ -1,5 +1,6 @@
 #include <array>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <set>
 #include <sstream>
@@ -109,6 +110,7 @@ public:
       cout << (i + 1) << ". ";
       cout << e.clause.toString() << " ";
 
+      // no parents is supposed to be empty
       if (e.parents.first == -1) {
         cout << "{}";
       } else {
@@ -154,6 +156,18 @@ Clause parseClause(const string &line) {
   return clause;
 }
 
+// return multiple negated clauses from a single clause
+vector<Clause> negateClause(const Clause &clause) {
+  vector<Clause> res;
+  for (const auto &literal : clause.literals) {
+    // create a clause out of every literal, and add its negation
+    Clause c;
+    c.literals.insert(literal.complement());
+    res.push_back(c);
+  }
+  return res;
+}
+
 /**
  * IO OPS
  */
@@ -184,11 +198,20 @@ int main(int argc, char **argv) {
   KnowledgeBase kb;
   vector<string> lines = readLines(argv[1]);
 
-  for (int i = 0; i + 1 < lines.size(); i++) {
+  // add everything except  query clause
+  for (int i = 0; i < lines.size() - 1; i++) {
     Clause clause = parseClause(lines[i]);
     kb.addClause(clause);
   }
   Clause query = parseClause(lines.back());
+
+  // our knowledge base has normal clauses in there now.
+  // now it's time for resolution
+
+  // negate the query clause
+  for (const auto &clause : negateClause(query)) {
+    kb.addClause(clause);
+  }
   kb.print();
 
   return 0;
