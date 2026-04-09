@@ -168,6 +168,66 @@ vector<Clause> negateClause(const Clause &clause) {
   return res;
 }
 
+vector<Clause> resolve(const Clause &a, const Clause &b) {
+  vector<Clause> resolvents;
+  set<Clause> unique;
+
+  for (const auto &lit : a.literals) {
+    Literal comp = lit.complement();
+
+    if (b.contains(comp)) {
+      Clause resolvent;
+
+      // add all literals from a except lit
+      for (const auto &x : a.literals) {
+        if (!(x == lit)) {
+          resolvent.literals.insert(x);
+        }
+      }
+
+      // add all literals from b except comp
+      for (const auto &x : b.literals) {
+        if (!(x == comp)) {
+          resolvent.literals.insert(x);
+        }
+      }
+
+      // no tautologies
+      if (!resolvent.isTautology()) {
+        unique.insert(resolvent);
+      }
+    }
+  }
+
+  for (const auto &clause : unique) {
+    resolvents.push_back(clause);
+  }
+
+  return resolvents;
+}
+
+bool resolveAll(KnowledgeBase &kb) {
+  for (size_t i = 0; i < kb.size(); i++) {
+    for (size_t j = 0; j < i; j++) {
+      vector<Clause> resolvents = resolve(kb[i].clause, kb[j].clause);
+
+      for (const auto &resolvent : resolvents) {
+        pair<int, int> parents = {static_cast<int>(i + 1),
+                                  static_cast<int>(j + 1)};
+
+        if (resolvent.isEmpty()) {
+          kb.addClause(resolvent, parents);
+          return true;
+        }
+
+        kb.addClause(resolvent, parents);
+      }
+    }
+  }
+
+  return false;
+}
+
 /**
  * IO OPS
  */
@@ -212,7 +272,10 @@ int main(int argc, char **argv) {
   for (const auto &clause : negateClause(query)) {
     kb.addClause(clause);
   }
+  bool valid = resolveAll(kb);
+
   kb.print();
+  cout << (valid ? "Valid" : "Fail") << "\n";
 
   return 0;
 }
