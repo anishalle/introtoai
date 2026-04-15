@@ -1,11 +1,20 @@
+CAPTURE = uv run capture.py
+PDB_CAPTURE = uv run python -m pdb capture.py
+
 vsbase:
-	uv run capture.py -r baselineTeam -b myTeam
+	$(CAPTURE) -r baselineTeam -b myTeam
 
 base:
-	uv run capture.py
+	$(CAPTURE)
 
 self:
-	uv run capture.py -r myTeam -b myTeam
+	$(CAPTURE) -r myTeam -b myTeam
 
 int:
-	uv run capture.py --keys0
+	$(CAPTURE) --keys0
+
+debug:
+	$(PDB_CAPTURE) -r baselineTeam -b myTeam
+
+debugall:
+	uv run tests/debug_capture.py --layout tinyCapture --all-agents --max-decisions 12
