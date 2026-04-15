@@ -1,13 +1,11 @@
+vsbase:
+	uv run capture.py -r baselineTeam -b myTeam
 
 base:
-	python3 capture.py
-
-vsbase:
-	python3 capture.py -r baselineTeam -b myTeam
+	uv run capture.py
 
 self:
-	python3 capture.py -r myTeam -b myTeam
+	uv run capture.py -r myTeam -b myTeam
 
 int:
-	python3 capture.py --keys0
-
+	uv run capture.py --keys0
