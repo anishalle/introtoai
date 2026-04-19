@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Phase 8: Lightweight offline training script for myTeam weights.
+Phase 8: Offline training script for myTeam PARAMS.
 
-Fits ridge regression models on collected training data to produce
-optimized weight dictionaries for offensive and defensive modes.
-
-Uses only numpy (no sklearn, no torch).
+Fits ridge regression models on collected training data to estimate
+the impact of state features on future success (score_delta_k, died_within_k).
+Uses the learned coefficients to adjust the PARAMS dictionary.
 
 Usage:
   python3 train_weights.py --data training_data/training_data.csv
-  python3 train_weights.py --data training_data/training_data.csv --output learned_weights.py
-  python3 train_weights.py --defaults
 """
 
 import argparse
 import os
 import sys
+import ast
 
 try:
     import numpy as np
@@ -23,24 +21,12 @@ try:
 except ImportError:
     HAS_NUMPY = False
 
-
-# Feature names matching myTeam.py
+# Feature names logged in collect_data.py
 FEATURE_NAMES = [
-    'successorScore', 'foodEaten', 'capsuleEaten', 'foodCarried',
-    'targetDistance', 'foodDistance', 'homeDistance', 'ghostDistance',
-    'ghostScared', 'capsuleDistance', 'escapeRoutes', 'inDeadEnd',
-    'threatPressure', 'deadEndRisk', 'timePressure', 'patrolDistance',
-    'lostFoodDistance', 'stop', 'reverse', 'died', 'returnedFood',
-    'onDefense', 'numVisibleInvaders', 'invaderDistance',
-    'scoreDiff', 'oscillation', 'dangerZone', 'tunnelEntryRisk',
-    'chokepointCoverage', 'noisyInvaderDist', 'teammateProximity',
+    'carrying', 'returned', 'isPacman', 'posX', 'posY',
+    'homeDist', 'foodLeft', 'foodDefending', 'movesLeft',
+    'positionRisk', 'visibleThreatDist', 'invaderDist'
 ]
-
-MODES = ['attack', 'return', 'defend', 'patrol', 'capsule']
-
-OFFENSIVE_MODES = {'attack', 'return', 'capsule'}
-DEFENSIVE_MODES = {'defend', 'patrol'}
-
 
 def load_csv(path):
     """Load CSV data into a list of dicts."""
@@ -52,8 +38,7 @@ def load_csv(path):
             rows.append(row)
     return rows
 
-
-def ridge_regression(X, y, lam=0.1):
+def ridge_regression(X, y, lam=1.0):
     """Fit ridge regression: w = (X^T X + lambda*I)^-1 X^T y"""
     n_features = X.shape[1]
     XtX = X.T @ X + lam * np.eye(n_features)
@@ -64,9 +49,47 @@ def ridge_regression(X, y, lam=0.1):
         w = np.linalg.lstsq(XtX, Xty, rcond=None)[0]
     return w
 
+def extract_params_from_myteam(filepath):
+    """Extract the PARAMS dict from myTeam.py using AST."""
+    with open(filepath, 'r') as f:
+        content = f.read()
+    
+    # Simple text extraction for PARAMS dict to preserve comments and formatting
+    start_marker = "PARAMS = {"
+    end_marker = "}\n\n\ndef createTeam"
+    
+    if start_marker in content and end_marker in content:
+        start_idx = content.find(start_marker)
+        end_idx = content.find(end_marker)
+        dict_str = content[start_idx:end_idx + 1]
+        
+        # Parse into actual python dict
+        try:
+            # Safely evaluate the dictionary part
+            clean_str = dict_str[dict_str.find('{'):]
+            params = ast.literal_eval(clean_str)
+            return params, content, start_idx, end_idx + 1
+        except Exception as e:
+            print(f"Error parsing PARAMS: {e}")
+            
+    print("Could not find PARAMS dict in myTeam.py")
+    return None, content, -1, -1
 
-def train_from_csv(csv_path, output_path):
-    """Train weights from collected CSV data."""
+def format_params(params):
+    """Format PARAMS dict as pasteable Python code."""
+    lines = ["PARAMS = {"]
+    for k, v in params.items():
+        if isinstance(v, bool):
+            lines.append(f"  '{k}': {v},")
+        elif isinstance(v, float):
+            lines.append(f"  '{k}': {round(v, 3)},")
+        else:
+            lines.append(f"  '{k}': {v},")
+    lines.append("}")
+    return '\n'.join(lines)
+
+def train_and_update(csv_path, myteam_path):
+    """Train weights and update myTeam.py."""
     if not HAS_NUMPY:
         print("ERROR: numpy is required for training. Install with: pip install numpy")
         return
@@ -78,171 +101,115 @@ def train_from_csv(csv_path, output_path):
 
     print(f"Loaded {len(rows)} examples from {csv_path}")
 
-    learned = {}
-    for mode in MODES:
-        mode_rows = [r for r in rows if r.get('mode', '') == mode]
-        if len(mode_rows) < 20:
-            print(f"  {mode}: only {len(mode_rows)} examples, skipping (need 20+)")
+    # Load current PARAMS
+    params, content, start_idx, end_idx = extract_params_from_myteam(myteam_path)
+    if params is None:
+        return
+
+    # Define feature mappings for each mode
+    mode_configs = [
+        {
+            'name': 'Attack',
+            'modes': ['attack'],
+            'target_fn': lambda r: float(r.get('score_delta_k', '') or 0) - 4.0 * float(r.get('died_within_k', '') or 0) + 0.5 * float(r.get('food_eaten_k', '') or 0),
+            'features': {
+                'feat_distanceToTarget': 'target_distance_coeff',
+                'feat_stop': 'stop_penalty',
+                'feat_reverse': 'reverse_penalty',
+                'feat_foodEaten': 'attack_food_eaten_bonus',
+                'feat_foodReturned': 'attack_food_returned_bonus',
+                'feat_risk': 'attack_risk_penalty',
+                'feat_carryHomeDistance': 'attack_carry_home_penalty',
+                'feat_laneMatch': 'attack_lane_bonus',
+                'feat_visibleGhostDistance': 'feat_visible_ghost_dist',
+                'feat_capsuleDistance': 'feat_capsule_dist',
+                'feat_escapeRoutes': 'feat_escape_routes',
+                'feat_deadEndFlag': 'feat_dead_end_flag',
+                'feat_tripDeadline': 'feat_trip_deadline',
+            }
+        },
+        {
+            'name': 'Retreat',
+            'modes': ['retreat'],
+            'target_fn': lambda r: float(r.get('returned_food_k', '') or 0) - 3.0 * float(r.get('died_within_k', '') or 0),
+            'features': {
+                'feat_homeDistance': 'retreat_home_coeff',
+                'feat_risk': 'retreat_risk_penalty',
+                'feat_foodReturned': 'retreat_return_bonus',
+                'feat_visibleGhostDistance': 'feat_visible_ghost_dist',
+                'feat_capsuleDistance': 'feat_capsule_dist',
+                'feat_escapeRoutes': 'feat_escape_routes',
+                'feat_deadEndFlag': 'feat_dead_end_flag',
+                'feat_tripDeadline': 'feat_trip_deadline',
+            }
+        },
+        {
+            'name': 'Defense',
+            'modes': ['intercept', 'patrol'],
+            'target_fn': lambda r: float(r.get('score_delta_k', '') or 0),
+            'features': {
+                'feat_invaderDistance': 'defense_invader_chase',
+                'feat_stayGhost': 'defense_stay_ghost_bonus',
+                'feat_becamePacman': 'defense_become_pacman_penalty',
+                'feat_scaredContact': 'defense_scared_contact_penalty',
+                'feat_eventDistance': 'feat_intercept_event_dist',
+            }
+        }
+    ]
+
+    alpha = 0.15  # Learning rate
+
+    for config in mode_configs:
+        mode_rows = [r for r in rows if r.get('mode') in config['modes']]
+        if len(mode_rows) < 50:
+            print(f"Skipping {config['name']} (only {len(mode_rows)} examples)")
             continue
 
-        # Build feature matrix
-        X = np.zeros((len(mode_rows), len(FEATURE_NAMES)))
+        X_cols = list(config['features'].keys())
+        X = np.zeros((len(mode_rows), len(X_cols)))
         for i, row in enumerate(mode_rows):
-            for j, fname in enumerate(FEATURE_NAMES):
-                try:
-                    X[i, j] = float(row.get(fname, 0))
-                except (ValueError, TypeError):
-                    X[i, j] = 0
+            for j, col in enumerate(X_cols):
+                val = row.get(col, '')
+                X[i, j] = float(val) if val != '' else 0
 
-        # Build target vector
-        if mode in OFFENSIVE_MODES:
-            y = np.array([float(r.get('score_delta_5', 0)) for r in mode_rows])
-        else:
-            y = np.array([
-                -float(r.get('invaderDistance', 0)) + float(r.get('onDefense', 0)) * 5
-                for r in mode_rows
-            ])
+        y_vals = [config['target_fn'](r) for r in mode_rows]
+        y = np.array(y_vals)
 
-        # Normalize features
         std = X.std(axis=0)
         std[std == 0] = 1
-        mean = X.mean(axis=0)
-        X_norm = (X - mean) / std
-
-        # Fit ridge regression
-        w = ridge_regression(X_norm, y, lam=1.0)
-
-        # Convert back to original scale
+        X_norm = (X - X.mean(axis=0)) / std
+        w = ridge_regression(X_norm, y, lam=5.0)
         w_orig = w / std
 
-        # Build weight dict
-        weight_dict = {}
-        for j, fname in enumerate(FEATURE_NAMES):
-            weight_dict[fname] = round(float(w_orig[j]), 2)
+        print(f"\n{config['name']} Model Weights:")
+        for col, weight in zip(X_cols, w_orig):
+            param_key = config['features'][col]
+            if param_key in params:
+                print(f"  {col} -> {param_key}: {weight:.3f}")
+                params[param_key] += alpha * weight
+            else:
+                print(f"  {col} -> {param_key}: {weight:.3f} (Key not found in PARAMS!)")
 
-        learned[mode] = weight_dict
-        r2 = 1 - np.sum((y - X @ (w / std))**2) / max(np.sum((y - y.mean())**2), 1e-10)
-        print(f"  {mode}: {len(mode_rows)} examples, R²={r2:.3f}")
-
-    # Write output
-    output_str = format_weights(learned)
-    with open(output_path, 'w') as f:
-        f.write(output_str)
-    print(f"\nWeights written to {output_path}")
-    print("Copy the LEARNED_WEIGHTS dict into myTeam.py to use learned weights.")
-
-
-def generate_default_weights():
-    """Generate reasonable default learned weights based on expert tuning."""
-    return {
-        'attack': {
-            'successorScore': 250, 'foodEaten': 140, 'capsuleEaten': 150,
-            'foodCarried': 15, 'targetDistance': -5, 'foodDistance': -2,
-            'homeDistance': -1, 'ghostDistance': 5, 'ghostScared': 100,
-            'capsuleDistance': -4, 'escapeRoutes': 18, 'inDeadEnd': -100,
-            'threatPressure': -90, 'deadEndRisk': -20, 'timePressure': -25,
-            'patrolDistance': 0, 'lostFoodDistance': 0, 'stop': -50,
-            'reverse': -8, 'died': -2000, 'returnedFood': 50,
-            'onDefense': 0, 'numVisibleInvaders': 0, 'invaderDistance': 0,
-            'scoreDiff': 5, 'oscillation': -35, 'dangerZone': -70,
-            'tunnelEntryRisk': -30, 'chokepointCoverage': 0,
-            'noisyInvaderDist': 0, 'teammateProximity': -10,
-        },
-        'return': {
-            'successorScore': 280, 'foodEaten': 10, 'capsuleEaten': 50,
-            'foodCarried': 25, 'targetDistance': -8, 'foodDistance': 0,
-            'homeDistance': -15, 'ghostDistance': 8, 'ghostScared': 90,
-            'capsuleDistance': -6, 'escapeRoutes': 20, 'inDeadEnd': -140,
-            'threatPressure': -100, 'deadEndRisk': -25, 'timePressure': -50,
-            'patrolDistance': 0, 'lostFoodDistance': 0, 'stop': -60,
-            'reverse': -10, 'died': -2500, 'returnedFood': 300,
-            'onDefense': 0, 'numVisibleInvaders': 0, 'invaderDistance': 0,
-            'scoreDiff': 0, 'oscillation': -45, 'dangerZone': -90,
-            'tunnelEntryRisk': -40, 'chokepointCoverage': 0,
-            'noisyInvaderDist': 0, 'teammateProximity': -5,
-        },
-        'defend': {
-            'successorScore': 200, 'foodEaten': 10, 'capsuleEaten': 25,
-            'foodCarried': 0, 'targetDistance': -8, 'foodDistance': 0,
-            'homeDistance': 0, 'ghostDistance': 0, 'ghostScared': 0,
-            'capsuleDistance': 0, 'escapeRoutes': 0, 'inDeadEnd': 0,
-            'threatPressure': 0, 'deadEndRisk': 0, 'timePressure': 0,
-            'patrolDistance': -10, 'lostFoodDistance': -12, 'stop': -90,
-            'reverse': -12, 'died': -600, 'returnedFood': 0,
-            'onDefense': 150, 'numVisibleInvaders': -300, 'invaderDistance': -20,
-            'scoreDiff': 0, 'oscillation': -25, 'dangerZone': 0,
-            'tunnelEntryRisk': 0, 'chokepointCoverage': 10,
-            'noisyInvaderDist': -8, 'teammateProximity': -12,
-        },
-        'patrol': {
-            'successorScore': 150, 'foodEaten': 10, 'capsuleEaten': 20,
-            'foodCarried': 0, 'targetDistance': -5, 'foodDistance': 0,
-            'homeDistance': 0, 'ghostDistance': 0, 'ghostScared': 0,
-            'capsuleDistance': 0, 'escapeRoutes': 0, 'inDeadEnd': 0,
-            'threatPressure': 0, 'deadEndRisk': 0, 'timePressure': 0,
-            'patrolDistance': -14, 'lostFoodDistance': -8, 'stop': -40,
-            'reverse': -8, 'died': -500, 'returnedFood': 0,
-            'onDefense': 100, 'numVisibleInvaders': -150, 'invaderDistance': -12,
-            'scoreDiff': 0, 'oscillation': -25, 'dangerZone': 0,
-            'tunnelEntryRisk': 0, 'chokepointCoverage': 12,
-            'noisyInvaderDist': -5, 'teammateProximity': -8,
-        },
-        'capsule': {
-            'successorScore': 220, 'foodEaten': 30, 'capsuleEaten': 250,
-            'foodCarried': 10, 'targetDistance': -10, 'foodDistance': 0,
-            'homeDistance': -2, 'ghostDistance': 6, 'ghostScared': 130,
-            'capsuleDistance': -15, 'escapeRoutes': 16, 'inDeadEnd': -90,
-            'threatPressure': -75, 'deadEndRisk': -20, 'timePressure': -18,
-            'patrolDistance': 0, 'lostFoodDistance': 0, 'stop': -40,
-            'reverse': -8, 'died': -1800, 'returnedFood': 0,
-            'onDefense': 0, 'numVisibleInvaders': 0, 'invaderDistance': 0,
-            'scoreDiff': 0, 'oscillation': -30, 'dangerZone': -55,
-            'tunnelEntryRisk': -22, 'chokepointCoverage': 0,
-            'noisyInvaderDist': 0, 'teammateProximity': -5,
-        },
-    }
-
-
-def format_weights(weights):
-    """Format weight dicts as pasteable Python code."""
-    lines = ["# Learned weights — paste into myTeam.py", ""]
-    lines.append("LEARNED_WEIGHTS = {")
-    for mode in MODES:
-        if mode not in weights:
-            continue
-        lines.append(f"  '{mode}': {{")
-        for fname in FEATURE_NAMES:
-            val = weights[mode].get(fname, 0)
-            lines.append(f"    '{fname}': {val},")
-        lines.append("  },")
-    lines.append("}")
-    lines.append("")
-    return '\n'.join(lines)
-
+    # 3. Write updated PARAMS back to myTeam.py
+    new_params_str = format_params(params)
+    new_content = content[:start_idx] + new_params_str + content[end_idx:]
+    
+    with open(myteam_path, 'w') as f:
+        f.write(new_content)
+        
+    print(f"\nSuccessfully updated PARAMS in {myteam_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Train myTeam weights')
-    parser.add_argument('--data', default=None, help='Path to training CSV')
-    parser.add_argument('--output', default='learned_weights.py', help='Output file')
-    parser.add_argument('--defaults', action='store_true',
-                        help='Generate expert-tuned default weights')
+    parser = argparse.ArgumentParser(description='Train myTeam PARAMS')
+    parser.add_argument('--data', default='training_data/training_data.csv', help='Path to training CSV')
+    parser.add_argument('--agent', default='myTeam.py', help='Path to myTeam.py')
     args = parser.parse_args()
 
-    if args.defaults or args.data is None:
-        print("Generating expert-tuned default weights...")
-        weights = generate_default_weights()
-        output_str = format_weights(weights)
-        with open(args.output, 'w') as f:
-            f.write(output_str)
-        print(f"Default weights written to {args.output}")
-        print("Copy LEARNED_WEIGHTS into myTeam.py to use.")
-    elif args.data and os.path.exists(args.data):
-        train_from_csv(args.data, args.output)
+    if os.path.exists(args.data):
+        train_and_update(args.data, args.agent)
     else:
         print(f"Data file not found: {args.data}")
         print("Run: python3 collect_data.py --games 50 first")
-        print("Or use: python3 train_weights.py --defaults")
-
 
 if __name__ == '__main__':
     main()

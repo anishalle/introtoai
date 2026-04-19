@@ -11,159 +11,21 @@
 # Student side autograding was added by Brad Miller, Nick Hay, and
 # Pieter Abbeel (pabbeel@cs.berkeley.edu).
 
-"""
-Shared-belief, dynamic-role capture team.
-
-The engine in this repo is a carry-home variant:
-- food is banked only when the agent crosses back home
-- carried food is dropped back onto the board on death
-- hidden enemies are invisible outside team sight range
-
-The team below is built around those rules:
-- map analysis is cached during registerInitialState
-- both agents update the same opponent belief state
-- each turn they switch among attack / retreat / intercept / patrol
-- offense follows risk-aware weighted A* plans
-- close fights use a shallow tactical adversarial tie-breaker
-"""
+# anish reddy alle & purva patel
 
 from captureAgents import CaptureAgent
 from game import Directions
 import util
-import os
-import json
-from collections import deque
 
 
 TEAM_MEMORY = {}
 
 
-# =====================================================================
-# TRAINABLE PARAMETERS — every numeric knob in one place
-# Run train_weights.py to optimize these from game data
-# =====================================================================
-PARAMS = {
-  'score_multiplier': 18.0,
-  'target_distance_coeff': -1.001,
-  'planned_action_bonus': 4.0,
-  'stop_penalty': -6.09,
-  'reverse_penalty': -1.51,
-  'attack_food_eaten_bonus': 14.119,
-  'attack_food_returned_bonus': 18.118,
-  'attack_risk_penalty': -10.048,
-  'attack_dead_end_penalty': -0.7,
-  'attack_carry_home_penalty': -0.631,
-  'attack_lane_bonus': 1.532,
-  'retreat_home_coeff': -2.568,
-  'retreat_risk_penalty': -12.314,
-  'retreat_return_bonus': 24.093,
-  'defense_invader_chase': -2.997,
-  'defense_stay_ghost_bonus': 3.973,
-  'defense_become_pacman_penalty': -9.973,
-  'defense_scared_contact_penalty': -10.265,
-  'tactical_radius': 5,
-  'tactical_top_n': 4,
-  'tactical_base_weight': 0.7,
-  'tactical_reply_weight': 0.3,
-  'tac_score_mult': 20.0,
-  'tac_risk_mult': -7.0,
-  'tac_carry_home_mult': -1.5,
-  'tac_invader_dist_mult': -2.5,
-  'tac_target_dist_mult': -0.4,
-  'food_risk_coeff': -5.0,
-  'food_depth_coeff': -1.2,
-  'food_depth_scared_coeff': -0.4,
-  'food_lane_penalty_opening': -4.5,
-  'food_lane_penalty_later': -2.0,
-  'food_shallow_bonus_max': 5,
-  'food_tempo_opening': 12,
-  'food_tempo_later': 9,
-  'food_tempo_weight': 1.5,
-  'food_distance_coeff': -1.8,
-  'food_home_dist_coeff': -0.9,
-  'food_carry_home_coeff': -0.6,
-  'food_threat_close_penalty': -4,
-  'food_threat_deep_penalty': -8,
-  'food_teammate_overlap': -5,
-  'food_slot0_bonus': 0.5,
-  'food_trip_deadline_penalty': 12.0,
-  'food_far_home_penalty': 3.0,
-  'food_race_penalty': 6.0,
-  'capsule_base': 18,
-  'capsule_dist_coeff': -2.2,
-  'capsule_risk_coeff': -3.0,
-  'capsule_threat_bonus': 10,
-  'capsule_teammate_penalty': -6,
-  'capsule_max_dist': 4,
-  'capsule_threat_dist': 5,
-  'path_offense_risk': 4.5,
-  'path_offense_dead_end': 0.2,
-  'path_retreat_dead_end_extra': 0.25,
-  'path_defense_risk': 1.5,
-  'path_teammate_goal_penalty': 2.5,
-  'astar_max_expansions': 300,
-  'astar_heuristic_weight': 1.15,
-  'risk_visible_dist1': 3.5,
-  'risk_visible_dist2': 2.0,
-  'risk_visible_dist4': 0.8,
-  'risk_belief_dist1': 2.0,
-  'risk_belief_dist2': 1.0,
-  'risk_belief_dist4': 0.4,
-  'risk_min_confidence': 0.2,
-  'retreat_base_opening': 5,
-  'retreat_base_default': 4,
-  'retreat_time60_adj': -1,
-  'retreat_time35_adj': -1,
-  'retreat_score4_adj': -1,
-  'retreat_behind4_adj': 1,
-  'retreat_far_home_adj': -1,
-  'retreat_threat5_adj': -2,
-  'retreat_scared8_adj': 1,
-  'retreat_min_threshold': 2,
-  'retreat_hard_carry': 5,
-  'retreat_carry3_dist7': True,
-  'retreat_threat4_any': True,
-  'role_late_defend_score': 2,
-  'role_force_two_score': 5,
-  'role_force_two_moves': 35,
-  'role_slot1_patrol_score': 5,
-  'role_slot1_patrol_moves': 30,
-  'role_behind_threshold': -2,
-  'role_offense_scared_min': 8,
-  'event_food_ttl': 8,
-  'event_capsule_ttl': 12,
-  'belief_anchor_exact': 4.0,
-  'belief_anchor_neighbor': 1.0,
-  'risk_belief_top_k': 4,
-  'def_carry_weight': 4,
-  'def_pacman_penalty': 12,
-  'def_slot1_bonus': -2,
-  'retreat_target_risk_weight': 2.0,
-  'intercept_visible_pressure': -6,
-  'intercept_belief_pressure': -4,
-  'intercept_exit_pressure': -2,
-  'intercept_scared_bonus': 4,
-  'role_hysteresis_turns': 2,
-  'opening_max_home_dist': 4,
-  'opening_max_depth': 2,
-  'opening_home_weight': 0.6,
-  'tactical_trigger_radius': 3,
-  'tactical_reply_blend_top_k': 2,
-  'feat_visible_ghost_dist': 1.504,
-  'feat_capsule_dist': -0.8,
-  'feat_escape_routes': 1.526,
-  'feat_dead_end_flag': -2.8,
-  'feat_trip_deadline': -4.0,
-  'feat_carrying': 0.8,
-  'feat_intercept_event_dist': -1.202,
-  'feat_patrol_border_dist': -1.0,
-}
-
-
+# sets up our two pacman agents for the game
 def createTeam(firstIndex, secondIndex, isRed,
                first='HybridCaptureAgent', second='HybridCaptureAgent'):
   """
-  Return the two agents that make up the team.
+  return the two agents that make up the team.
   """
   return [
     loadAgentClass(first)(firstIndex, slot=0),
@@ -180,7 +42,7 @@ def loadAgentClass(className):
 
 class HybridCaptureAgent(CaptureAgent):
   """
-  Shared-belief, intent-switching capture agent.
+  shared-belief, intent-switching capture agent.
   """
 
   def __init__(self, index, slot=0, timeForComputing=.1):
@@ -191,6 +53,7 @@ class HybridCaptureAgent(CaptureAgent):
     self.shared = None
     self.lastDecisionInfo = {}
 
+  # runs once at the start of the game to prep the map and shared memory
   def registerInitialState(self, gameState):
     CaptureAgent.registerInitialState(self, gameState)
     self.start = gameState.getAgentPosition(self.index)
@@ -207,43 +70,26 @@ class HybridCaptureAgent(CaptureAgent):
   def getLastDecisionInfo(self):
     return self.lastDecisionInfo
 
-  ##############################
-  # High-level decision driver #
-  ##############################
+  # decision driver 
 
+  # main loop: figures out what the agent should do this turn
   def chooseAction(self, gameState):
     self.updateSharedState(gameState)
 
     legalActions = gameState.getLegalActions(self.index)
     if len(legalActions) == 1:
       action = legalActions[0]
-      self.recordDecision(
-        gameState,
-        'forced',
-        None,
-        action,
-        {action: 0.0},
-        [{'action': action, 'score': 0.0, 'features': {}, 'weights': {}}],
-        ['forced action'],
-      )
+      self.recordDecision(gameState, 'forced', None, action, {})
       return action
 
     modeMap = self.assignRoles(gameState)
     mode = modeMap[self.index]
     target, targetKind = self.pickTarget(gameState, mode)
     plan = self.planToTarget(gameState, target, mode)
-    actionScores, actionDetails = self.scoreActions(gameState, legalActions, mode, target, plan)
-    debugMessages = [
-      'targetKind=%s' % targetKind,
-      'target=%s' % (target,),
-      'planLength=%d' % len(plan),
-    ]
+    actionScores = self.scoreActions(gameState, legalActions, mode, target, plan)
 
     if self.shouldUseTacticalSearch(gameState, mode):
-      actionScores, actionDetails = self.applyTacticalSearch(
-        gameState, actionScores, actionDetails, mode, target
-      )
-      debugMessages.append('tacticalSearch=on')
+      actionScores = self.applyTacticalSearch(gameState, actionScores, mode, target)
 
     bestScore = max(actionScores.values())
     bestActions = [action for action in legalActions if actionScores[action] == bestScore]
@@ -253,14 +99,13 @@ class HybridCaptureAgent(CaptureAgent):
     self.shared['agent_goals'][self.index] = target
     self.shared['agent_goal_kinds'][self.index] = targetKind
     self.shared['agent_paths'][self.index] = plan
-    self.recordDecision(gameState, mode, target, action, actionScores, actionDetails, debugMessages)
-    self._logTurnData(gameState, mode, action, actionScores, actionDetails)
+    self.recordDecision(gameState, mode, target, action, actionScores)
     return action
 
-  ##########################
-  # Shared state / beliefs #
-  ##########################
+  
+  #shared state / beliefs 
 
+  # scans the whole board to figure out distances, borders, and dead ends
   def buildTeamMemory(self, gameState):
     walls = gameState.getWalls()
     width = walls.width
@@ -310,13 +155,11 @@ class HybridCaptureAgent(CaptureAgent):
       'patrol_points': patrolPoints,
       'dead_end_depth': deadEndDepth,
       'beliefs': beliefs,
-      'belief_hotspots': dict((enemy, [(gameState.getInitialAgentPosition(enemy), 1.0)]) for enemy in opponents),
       'enemy_pacman': enemyPacman,
       'recent_events': [],
       'agent_goals': {},
       'agent_goal_kinds': {},
       'agent_modes': {},
-      'mode_locks': {},
       'agent_paths': {},
       'agent_slots': {},
       'agent_starts': {},
@@ -326,12 +169,14 @@ class HybridCaptureAgent(CaptureAgent):
       'contest_length': gameState.data.timeleft,
     }
 
+  # syncs what this agent sees with what the teammate sees
   def updateSharedState(self, gameState):
     self.decayRecentEvents()
     self.trackFoodDefenseEvents(gameState)
     self.updateBeliefs(gameState)
     self.shared['updates'] += 1
 
+  # slowly forgets about old events like eaten food over time
   def decayRecentEvents(self):
     kept = []
     for event in self.shared['recent_events']:
@@ -340,6 +185,7 @@ class HybridCaptureAgent(CaptureAgent):
         kept.append({'pos': event['pos'], 'ttl': ttl, 'kind': event['kind']})
     self.shared['recent_events'] = kept
 
+  # checks if our food disappeared so we know where enemies are
   def trackFoodDefenseEvents(self, gameState):
     currentFood = set(self.getFoodYouAreDefending(gameState).asList())
     currentCapsules = set(self.getCapsulesYouAreDefending(gameState))
@@ -347,13 +193,14 @@ class HybridCaptureAgent(CaptureAgent):
     missingCapsules = self.shared['last_capsules_defending'] - currentCapsules
 
     for pos in missingFood:
-      self.shared['recent_events'].append({'pos': pos, 'ttl': PARAMS['event_food_ttl'], 'kind': 'food'})
+      self.shared['recent_events'].append({'pos': pos, 'ttl': 8, 'kind': 'food'})
     for pos in missingCapsules:
-      self.shared['recent_events'].append({'pos': pos, 'ttl': PARAMS['event_capsule_ttl'], 'kind': 'capsule'})
+      self.shared['recent_events'].append({'pos': pos, 'ttl': 12, 'kind': 'capsule'})
 
     self.shared['last_food_defending'] = currentFood
     self.shared['last_capsules_defending'] = currentCapsules
 
+  # guesses where invisible enemies are hiding using probabilities
   def updateBeliefs(self, gameState):
     lastMoved = getattr(gameState.data, '_agentMoved', None)
     teammatePositions = [gameState.getAgentPosition(agent) for agent in self.getTeam(gameState)]
@@ -384,15 +231,9 @@ class HybridCaptureAgent(CaptureAgent):
 
       belief.normalize()
       self.shared['beliefs'][enemy] = belief
-      self.shared['belief_hotspots'][enemy] = self.extractBeliefHotspots(belief)
       self.shared['enemy_pacman'][enemy] = enemyState.isPacman
 
-  def extractBeliefHotspots(self, belief):
-    if belief.totalCount() == 0:
-      return []
-    ranked = sorted(belief.items(), key=lambda item: (-item[1], item[0]))
-    return ranked[:PARAMS['risk_belief_top_k']]
-
+  # spreads out our guesses of where the enemy moved
   def propagateBelief(self, belief):
     newBelief = util.Counter()
     for pos, prob in belief.items():
@@ -402,6 +243,7 @@ class HybridCaptureAgent(CaptureAgent):
         newBelief[nextPos] += split
     return newBelief
 
+  # removes places the enemy definitely can't be
   def filterBelief(self, gameState, belief, enemyIsPacman, teammatePositions):
     allowed = self.shared['home_positions'] if enemyIsPacman else self.shared['enemy_positions']
     filtered = util.Counter()
@@ -413,6 +255,7 @@ class HybridCaptureAgent(CaptureAgent):
       filtered[pos] += prob
     return filtered
 
+  # heavily updates our guesses if we saw them eat something
   def anchorBeliefToEvents(self, gameState, belief, enemy, enemyIsPacman):
     if belief.totalCount() == 0:
       return belief
@@ -427,16 +270,17 @@ class HybridCaptureAgent(CaptureAgent):
     matched = False
     for pos in eventPositions:
       if pos in anchored:
-        anchored[pos] += PARAMS['belief_anchor_exact']
+        anchored[pos] += 4.0
         matched = True
       for neighbor in self.shared['neighbors'].get(pos, []):
         if neighbor in anchored:
-          anchored[neighbor] += PARAMS['belief_anchor_neighbor']
+          anchored[neighbor] += 1.0
           matched = True
     if matched:
       return anchored
     return belief
 
+  # if we completely lose the enemy, just guess they could be anywhere on their side
   def seedFallbackBelief(self, gameState, enemyIsPacman, teammatePositions):
     allowed = self.shared['home_positions'] if enemyIsPacman else self.shared['enemy_positions']
     belief = util.Counter()
@@ -449,10 +293,9 @@ class HybridCaptureAgent(CaptureAgent):
         belief[pos] = 1.0
     return belief
 
-  ###################
-  # Role assignment #
-  ###################
+  # role assignment
 
+  # decides who attacks and who defends based on the current score and threats
   def assignRoles(self, gameState):
     team = self.getTeam(gameState)
     invaders = [enemy for enemy in self.getOpponents(gameState)
@@ -462,25 +305,25 @@ class HybridCaptureAgent(CaptureAgent):
     threatTarget = self.primaryThreatTarget(gameState)
     score = self.getScore(gameState)
     ownMovesLeft = self.ownMovesLeft(gameState)
-    offensiveWindow = self.maxEnemyScaredTimer(gameState) >= PARAMS['role_offense_scared_min']
+    offensiveWindow = self.maxEnemyScaredTimer(gameState) >= 8
     openingPhase = self.inOpeningPhase(gameState)
     latePhase = self.inLatePhase(gameState)
 
     needDefenders = 0
     if invaders:
       needDefenders = 1
-      if len(invaders) > 1 or (score >= PARAMS['role_late_defend_score'] and latePhase):
+      if len(invaders) > 1 or (score >= 2 and latePhase):
         needDefenders = 2
     elif self.shared['recent_events'] and not openingPhase:
       needDefenders = 1
-    elif latePhase and score >= PARAMS['role_late_defend_score'] and not offensiveWindow:
+    elif latePhase and score >= 2 and not offensiveWindow:
       needDefenders = 1
-    elif score >= PARAMS['role_force_two_score'] and ownMovesLeft <= PARAMS['role_force_two_moves']:
+    elif score >= 5 and ownMovesLeft <= 35:
       needDefenders = 2
 
     if openingPhase and not invaders and not self.shared['recent_events']:
       needDefenders = 0
-    elif score <= PARAMS['role_behind_threshold'] and not invaders and not self.shared['recent_events']:
+    elif score <= -2 and not invaders and not self.shared['recent_events']:
       needDefenders = 0
     if offensiveWindow and score < 6 and not invaders:
       needDefenders = 0
@@ -504,51 +347,17 @@ class HybridCaptureAgent(CaptureAgent):
       else:
         modes[agent] = 'attack'
 
-    if modes[self.index] == 'attack' and self.slot == 1 and score >= PARAMS['role_slot1_patrol_score'] and ownMovesLeft <= PARAMS['role_slot1_patrol_moves'] and not invaders:
+    if modes[self.index] == 'attack' and self.slot == 1 and score >= 5 and ownMovesLeft <= 30 and not invaders:
       modes[self.index] = 'patrol'
-    return self.applyRoleHysteresis(gameState, modes, visibleInvaders)
+    return modes
 
-  def applyRoleHysteresis(self, gameState, proposedModes, visibleInvaders):
-    stabilized = {}
-    for agent, proposed in proposedModes.items():
-      previous = self.shared['agent_modes'].get(agent)
-      lock = self.shared['mode_locks'].get(agent, 0)
-
-      if previous is None or proposed == previous:
-        stabilized[agent] = proposed
-        self.shared['mode_locks'][agent] = PARAMS['role_hysteresis_turns']
-        continue
-
-      if self.isHardRoleSwitch(gameState, agent, previous, proposed, visibleInvaders):
-        stabilized[agent] = proposed
-        self.shared['mode_locks'][agent] = PARAMS['role_hysteresis_turns']
-        continue
-
-      if lock > 0:
-        stabilized[agent] = previous
-        self.shared['mode_locks'][agent] = lock - 1
-      else:
-        stabilized[agent] = proposed
-        self.shared['mode_locks'][agent] = PARAMS['role_hysteresis_turns']
-    return stabilized
-
-  def isHardRoleSwitch(self, gameState, agent, previous, proposed, visibleInvaders):
-    if previous == 'retreat' or proposed == 'retreat':
-      return True
-    if visibleInvaders and proposed == 'intercept':
-      return True
-    if self.mustRetreatAgent(gameState, agent):
-      return True
-    if previous == 'intercept' and proposed == 'attack' and self.shared['recent_events']:
-      return False
-    return False
-
+  # scores how urgently this agent needs to go back and defend
   def defensePriority(self, gameState, agentIndex, visibleInvaders, threatTarget=None):
     agentState = gameState.getAgentState(agentIndex)
     agentSlot = self.shared['agent_slots'].get(agentIndex, 0)
     pos = gameState.getAgentPosition(agentIndex)
-    carryingPenalty = agentState.numCarrying * PARAMS['def_carry_weight']
-    pacmanPenalty = PARAMS['def_pacman_penalty'] if agentState.isPacman else 0
+    carryingPenalty = agentState.numCarrying * 4
+    pacmanPenalty = 12 if agentState.isPacman else 0
     homeDist = self.shared['home_distance'].get(pos, 0) if pos is not None else 0
     targetDist = 0
 
@@ -560,8 +369,9 @@ class HybridCaptureAgent(CaptureAgent):
     elif self.shared['recent_events'] and pos is not None:
       targetDist = min(self.getMazeDistance(pos, event['pos']) for event in self.shared['recent_events'])
 
-    return carryingPenalty + pacmanPenalty + homeDist + targetDist + (PARAMS['def_slot1_bonus'] if agentSlot == 1 else 0)
+    return carryingPenalty + pacmanPenalty + homeDist + targetDist - (2 if agentSlot == 1 else 0)
 
+  # checks if the agent is carrying too much food or is in danger and needs to run home
   def mustRetreatAgent(self, gameState, agentIndex):
     agentState = gameState.getAgentState(agentIndex)
     pos = gameState.getAgentPosition(agentIndex)
@@ -585,26 +395,26 @@ class HybridCaptureAgent(CaptureAgent):
     score = self.getScore(gameState)
     scaredWindow = self.maxEnemyScaredTimer(gameState)
 
-    threshold = PARAMS['retreat_base_opening'] if self.inOpeningPhase(gameState) else PARAMS['retreat_base_default']
+    threshold = 5 if self.inOpeningPhase(gameState) else 4
     if ownMovesLeft <= 60:
-      threshold += PARAMS['retreat_time60_adj']
+      threshold -= 1
     if ownMovesLeft <= 35:
-      threshold += PARAMS['retreat_time35_adj']
+      threshold -= 1
     if score >= 4:
-      threshold += PARAMS['retreat_score4_adj']
+      threshold -= 1
     if score <= -4 and scaredWindow < 6:
-      threshold += PARAMS['retreat_behind4_adj']
+      threshold += 1
     if homeDist >= 7:
-      threshold += PARAMS['retreat_far_home_adj']
+      threshold -= 1
     if visibleThreatDist is not None and visibleThreatDist <= 5:
-      threshold += PARAMS['retreat_threat5_adj']
+      threshold -= 2
     if scaredWindow >= 8 and visibleThreatDist is None:
-      threshold += PARAMS['retreat_scared8_adj']
-    threshold = max(PARAMS['retreat_min_threshold'], threshold)
+      threshold += 1
+    threshold = max(2, threshold)
 
     if carrying >= threshold:
       return True
-    if carrying >= PARAMS['retreat_hard_carry']:
+    if carrying >= 5:
       return True
     if carrying >= 3 and homeDist >= 7:
       return True
@@ -618,10 +428,9 @@ class HybridCaptureAgent(CaptureAgent):
       return True
     return False
 
-  #########################
-  # Target selection      #
-  #########################
+  # target selection
 
+  # routes the agent to the right target depending on their current role
   def pickTarget(self, gameState, mode):
     if mode == 'retreat':
       return self.pickRetreatTarget(gameState), 'border'
@@ -631,17 +440,19 @@ class HybridCaptureAgent(CaptureAgent):
       return self.pickPatrolTarget(gameState), 'patrol'
     return self.pickAttackTarget(gameState)
 
+  # finds the safest way back home to deposit food
   def pickRetreatTarget(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
     bestTarget = None
     bestScore = None
     for border in self.shared['home_border']:
-      score = self.getMazeDistance(myPos, border) + PARAMS['retreat_target_risk_weight'] * self.positionRisk(gameState, border)
+      score = self.getMazeDistance(myPos, border) + 2.0 * self.positionRisk(gameState, border)
       if bestScore is None or score < bestScore:
         bestScore = score
         bestTarget = border
     return bestTarget
 
+  # tries to cut off the enemy pacman by guessing where they will go
   def pickInterceptTarget(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
     invaders = [enemy for enemy in self.getOpponents(gameState)
@@ -675,19 +486,20 @@ class HybridCaptureAgent(CaptureAgent):
       distance = self.getMazeDistance(myPos, target)
       pressure = 0
       if kind == 'visible':
-        pressure = PARAMS['intercept_visible_pressure']
+        pressure = -6
       elif kind == 'exit':
-        pressure = PARAMS['intercept_exit_pressure']
+        pressure = -2
       elif kind == 'belief':
-        pressure = PARAMS['intercept_belief_pressure']
+        pressure = -4
       score = distance + pressure
       if gameState.getAgentState(self.index).scaredTimer > 0 and kind == 'visible':
-        score += PARAMS['intercept_scared_bonus']
+        score += 4
       if bestScore is None or score < bestScore:
         bestScore = score
         bestTarget = target
     return bestTarget
 
+  # wanders around our side to guard the choke points
   def pickPatrolTarget(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
     teammateGoal = self.getTeammateGoal()
@@ -720,6 +532,7 @@ class HybridCaptureAgent(CaptureAgent):
         bestTarget = target
     return bestTarget
 
+  # picks the best food or capsule to eat while avoiding danger
   def pickAttackTarget(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
     food = self.getFood(gameState).asList()
@@ -742,17 +555,17 @@ class HybridCaptureAgent(CaptureAgent):
     if capsules:
       for capsule in capsules:
         distance = self.getMazeDistance(myPos, capsule)
-        if distance > PARAMS['capsule_max_dist'] and (threatDist is None or threatDist > PARAMS['capsule_threat_dist']):
+        if distance > 4 and (threatDist is None or threatDist > 5):
           continue
         value = (
-          PARAMS['capsule_base']
-          + PARAMS['capsule_dist_coeff'] * distance
-          + PARAMS['capsule_risk_coeff'] * self.positionRisk(gameState, capsule)
+          18
+          - 2.2 * distance
+          - 3.0 * self.positionRisk(gameState, capsule)
         )
-        if threatDist is not None and threatDist <= PARAMS['capsule_threat_dist']:
-          value += PARAMS['capsule_threat_bonus']
+        if threatDist is not None and threatDist <= 5:
+          value += 10
         if teammateGoal is not None and self.getMazeDistance(capsule, teammateGoal) <= 2:
-          value += PARAMS['capsule_teammate_penalty']
+          value -= 6
         if bestValue is None or value > bestValue:
           bestValue = value
           bestTarget = capsule
@@ -760,13 +573,13 @@ class HybridCaptureAgent(CaptureAgent):
 
     openingFrontier = [
       pellet for pellet in candidateFoods
-      if self.shared['home_distance'][pellet] <= PARAMS['opening_max_home_dist'] and self.shared['dead_end_depth'].get(pellet, 0) <= PARAMS['opening_max_depth']
+      if self.shared['home_distance'][pellet] <= 4 and self.shared['dead_end_depth'].get(pellet, 0) <= 2
     ]
     if openingPhase and openingFrontier:
       openingFrontier = sorted(
         openingFrontier,
         key=lambda pellet: (
-          self.getMazeDistance(myPos, pellet) + PARAMS['opening_home_weight'] * self.shared['home_distance'][pellet],
+          self.getMazeDistance(myPos, pellet) + 0.6 * self.shared['home_distance'][pellet],
           self.shared['dead_end_depth'].get(pellet, 0),
         ),
       )
@@ -776,44 +589,44 @@ class HybridCaptureAgent(CaptureAgent):
       distance = self.getMazeDistance(myPos, pellet)
       homeDist = self.shared['home_distance'][pellet]
       depth = self.shared['dead_end_depth'].get(pellet, 0)
-      riskPenalty = abs(PARAMS['food_risk_coeff']) * self.positionRisk(gameState, pellet)
-      depthPenalty = abs(PARAMS['food_depth_coeff']) * depth if scaredWindow < 4 else abs(PARAMS['food_depth_scared_coeff']) * depth
+      riskPenalty = 5.0 * self.positionRisk(gameState, pellet)
+      depthPenalty = 1.2 * depth if scaredWindow < 4 else 0.4 * depth
       tripCost = distance + homeDist
       lanePenalty = 0.0
       if preferredLaneFoods and len(preferredLaneFoods) >= 3 and not self.matchesPreferredLane(pellet, preferredUpper):
-        lanePenalty = abs(PARAMS['food_lane_penalty_opening']) if openingPhase else abs(PARAMS['food_lane_penalty_later'])
-      shallowBonus = max(0, PARAMS['food_shallow_bonus_max'] - homeDist)
-      tempoBonus = max(0, PARAMS['food_tempo_opening'] - tripCost) if openingPhase else max(0, PARAMS['food_tempo_later'] - tripCost)
+        lanePenalty = 4.5 if openingPhase else 2.0
+      shallowBonus = max(0, 5 - homeDist)
+      tempoBonus = max(0, 12 - tripCost) if openingPhase else max(0, 9 - tripCost)
       tempoPenalty = 0.0
       if tripCost > ownMovesLeft - 4:
-        tempoPenalty += PARAMS['food_trip_deadline_penalty']
+        tempoPenalty += 12.0
       if homeDist >= 8 and scaredWindow < 6:
-        tempoPenalty += PARAMS['food_far_home_penalty']
+        tempoPenalty += 3.0
       if threatPos is not None and depth >= 2:
         foodRace = self.getMazeDistance(threatPos, pellet) - distance
         if foodRace <= 1:
-          tempoPenalty += PARAMS['food_race_penalty']
+          tempoPenalty += 6.0
 
       value = (
         + shallowBonus
-        + PARAMS['food_tempo_weight'] * tempoBonus
-        + PARAMS['food_distance_coeff'] * distance
-        + PARAMS['food_home_dist_coeff'] * homeDist
+        + 1.5 * tempoBonus
+        - 1.8 * distance
+        - 0.9 * homeDist
         - riskPenalty
         - depthPenalty
         - lanePenalty
         - tempoPenalty
       )
       if carrying > 0:
-        value += PARAMS['food_carry_home_coeff'] * carrying * homeDist
+        value -= 0.6 * carrying * homeDist
       if threatDist is not None and threatDist <= 4:
-        value += PARAMS['food_threat_close_penalty']
+        value -= 4
       if threatDist is not None and threatDist <= 6 and depth >= 2:
-        value += PARAMS['food_threat_deep_penalty']
+        value -= 8
       if teammateGoal is not None and self.getMazeDistance(pellet, teammateGoal) <= 3:
-        value += PARAMS['food_teammate_overlap']
+        value -= 5
       if self.slot == 0:
-        value += PARAMS['food_slot0_bonus']
+        value += 0.5
       if bestValue is None or value > bestValue:
         bestValue = value
         bestTarget = pellet
@@ -823,9 +636,7 @@ class HybridCaptureAgent(CaptureAgent):
       return self.pickRetreatTarget(gameState), 'border'
     return bestTarget, bestKind
 
-
-
-
+  # checks where the teammate is going so we don't crowd them
   def getTeammateGoal(self):
     for teammate in self.teamKey[1]:
       if teammate == self.index:
@@ -834,10 +645,8 @@ class HybridCaptureAgent(CaptureAgent):
         return self.shared['agent_goals'][teammate]
     return None
 
-  #########################
-  # Planning and scoring  #
-  #########################
-
+  # planning and scoring  
+  # builds a path to the target using a*
   def planToTarget(self, gameState, target, mode):
     if target is None:
       return []
@@ -846,13 +655,14 @@ class HybridCaptureAgent(CaptureAgent):
       return []
     return self.weightedAStar(gameState, myPos, set([target]), mode)
 
+  # pathfinding that avoids dangerous spots and dead ends
   def weightedAStar(self, gameState, start, goals, mode):
     frontier = util.PriorityQueue()
     frontier.push((start, [], 0.0), 0.0)
     bestCost = {start: 0.0}
     expansions = 0
 
-    while not frontier.isEmpty() and expansions < PARAMS['astar_max_expansions']:
+    while not frontier.isEmpty() and expansions < 300:
       pos, path, cost = frontier.pop()
       if cost > bestCost.get(pos, 999999):
         continue
@@ -868,218 +678,111 @@ class HybridCaptureAgent(CaptureAgent):
         bestCost[nextPos] = newCost
         action = self.directionFromTo(pos, nextPos)
         heuristic = min(self.getMazeDistance(nextPos, goal) for goal in goals)
-        frontier.push((nextPos, path + [action], newCost), newCost + PARAMS['astar_heuristic_weight'] * heuristic)
+        frontier.push((nextPos, path + [action], newCost), newCost + 1.15 * heuristic)
     return []
 
+  # adds extra cost to dangerous tiles so the agent avoids them
   def pathCellPenalty(self, gameState, pos, mode):
     risk = self.positionRisk(gameState, pos)
     penalty = 0.0
 
     if mode in ('attack', 'retreat'):
-      penalty += PARAMS['path_offense_risk'] * risk
+      penalty += 4.5 * risk
       if pos in self.shared['enemy_positions']:
-        penalty += PARAMS['path_offense_dead_end'] * self.shared['dead_end_depth'].get(pos, 0)
+        penalty += 0.2 * self.shared['dead_end_depth'].get(pos, 0)
         if mode == 'retreat':
-          penalty += PARAMS['path_retreat_dead_end_extra'] * self.shared['dead_end_depth'].get(pos, 0)
+          penalty += 0.25 * self.shared['dead_end_depth'].get(pos, 0)
     else:
-      penalty += PARAMS['path_defense_risk'] * risk
+      penalty += 1.5 * risk
 
     teammateGoal = self.getTeammateGoal()
     if teammateGoal is not None and pos == teammateGoal:
-      penalty += PARAMS['path_teammate_goal_penalty']
+      penalty += 2.5
     return penalty
 
+  # gives a numerical score to every possible move we can make right now
   def scoreActions(self, gameState, legalActions, mode, target, plan):
     scores = {}
-    details = []
-    context = self.buildTurnContext(gameState, mode, target, plan)
-    weights = self.getModeWeights(mode)
+    plannedAction = plan[0] if plan else None
+    currentDirection = gameState.getAgentState(self.index).getDirection()
+    currentState = gameState.getAgentState(self.index)
 
     for action in legalActions:
-      features = self.extractActionFeatures(gameState, action, mode, context)
-      score = round(features * weights, 6)
-      scores[action] = score
-      details.append({
-        'action': action,
-        'score': score,
-        'features': dict(features),
-        'weights': dict(weights),
-      })
-    return scores, details
+      successor = gameState.generateSuccessor(self.index, action)
+      nextState = successor.getAgentState(self.index)
+      nextPos = successor.getAgentPosition(self.index)
+      if nextPos is None:
+        nextPos = nextState.getPosition()
 
-  def buildTurnContext(self, gameState, mode, target, plan):
-    currentState = gameState.getAgentState(self.index)
-    currentPos = gameState.getAgentPosition(self.index)
-    if currentPos is None:
-      currentPos = currentState.getPosition()
-    return {
-      'mode': mode,
-      'target': target,
-      'plannedAction': plan[0] if plan else None,
-      'currentState': currentState,
-      'currentPos': currentPos,
-      'currentDirection': currentState.getDirection(),
-      'foodCount': len(self.getFood(gameState).asList()),
-      'openingPhase': self.inOpeningPhase(gameState),
-      'ownMovesLeft': self.ownMovesLeft(gameState),
-      'preferredUpper': self.preferredUpperLane(),
-      'closestInvader': self.closestInvaderPosition(gameState),
-      'recentEventPos': self.primaryThreatTarget(gameState),
-    }
+      score = self.getScore(successor) * 18.0
+      if target is not None:
+        score -= self.getMazeDistance(nextPos, target)
+      if plannedAction == action:
+        score += 4.0
+      if action == Directions.STOP:
+        score -= 6.0
+      if action == Directions.REVERSE[currentDirection]:
+        score -= 1.5
 
-  def extractActionFeatures(self, gameState, action, mode, context):
-    successor = gameState.generateSuccessor(self.index, action)
-    nextState = successor.getAgentState(self.index)
-    nextPos = successor.getAgentPosition(self.index)
-    if nextPos is None:
-      nextPos = nextState.getPosition()
-
-    currentState = context['currentState']
-    features = util.Counter()
-    features['teamScore'] = self.getScore(successor)
-    features['distanceToTarget'] = self.targetDistance(nextPos, context['target'])
-    features['plannedAction'] = int(action == context['plannedAction'])
-    features['stop'] = int(action == Directions.STOP)
-    features['reverse'] = int(action == Directions.REVERSE[context['currentDirection']])
-    features['foodEaten'] = context['foodCount'] - len(self.getFood(successor).asList())
-    features['foodReturned'] = nextState.numReturned - currentState.numReturned
-    features['risk'] = self.positionRisk(gameState, nextPos)
-    features['homeDistance'] = self.shared['home_distance'].get(nextPos, 0)
-    features['carrying'] = currentState.numCarrying
-    features['carryHomeDistance'] = currentState.numCarrying * features['homeDistance']
-    onEnemySide = nextPos in self.shared['enemy_positions']
-    features['visibleGhostDistance'] = self.nearestVisibleGhostDistance(gameState, nextPos) if onEnemySide else 0
-    features['capsuleDistance'] = self.nearestCapsuleDistance(gameState, nextPos) if onEnemySide else 0
-    features['escapeRoutes'] = self.countSafeNeighbors(gameState, nextPos) if onEnemySide else 0
-    features['deadEndFlag'] = int(onEnemySide and self.shared['dead_end_depth'].get(nextPos, 0) >= 2)
-    features['tripDeadline'] = self.tripDeadlinePressure(context['ownMovesLeft'], features['homeDistance'], currentState.numCarrying) if onEnemySide else 0
-    features['laneMatch'] = int(
-      context['openingPhase'] and self.matchesPreferredLane(nextPos, context['preferredUpper'])
-    )
-
-    invaderPos = context['closestInvader']
-    if invaderPos is not None:
-      features['invaderDistance'] = self.getMazeDistance(nextPos, invaderPos)
-      features['eventDistance'] = self.getMazeDistance(nextPos, invaderPos)
-    else:
-      eventPos = context['recentEventPos']
-      features['invaderDistance'] = 0
-      features['eventDistance'] = self.targetDistance(nextPos, eventPos)
-
-    features['stayGhost'] = int(not nextState.isPacman)
-    features['becamePacman'] = int(nextState.isPacman)
-    features['scaredContact'] = int(
-      nextState.scaredTimer > 0 and invaderPos is not None and self.getMazeDistance(nextPos, invaderPos) <= 1
-    )
-    return features
-
-  def getModeWeights(self, mode):
-    weights = util.Counter({
-      'teamScore': PARAMS['score_multiplier'],
-      'distanceToTarget': PARAMS['target_distance_coeff'],
-      'plannedAction': PARAMS['planned_action_bonus'],
-      'stop': PARAMS['stop_penalty'],
-      'reverse': PARAMS['reverse_penalty'],
-    })
-
-    if mode == 'attack':
-      weights['foodEaten'] = PARAMS['attack_food_eaten_bonus']
-      weights['foodReturned'] = PARAMS['attack_food_returned_bonus']
-      weights['risk'] = PARAMS['attack_risk_penalty']
-      weights['carrying'] = PARAMS['feat_carrying']
-      weights['carryHomeDistance'] = PARAMS['attack_carry_home_penalty']
-      weights['visibleGhostDistance'] = PARAMS['feat_visible_ghost_dist']
-      weights['capsuleDistance'] = PARAMS['feat_capsule_dist']
-      weights['escapeRoutes'] = PARAMS['feat_escape_routes']
-      weights['deadEndFlag'] = PARAMS['feat_dead_end_flag']
-      weights['tripDeadline'] = PARAMS['feat_trip_deadline']
-      weights['laneMatch'] = PARAMS['attack_lane_bonus']
-    elif mode == 'retreat':
-      weights['homeDistance'] = PARAMS['retreat_home_coeff']
-      weights['risk'] = PARAMS['retreat_risk_penalty']
-      weights['foodReturned'] = PARAMS['retreat_return_bonus']
-      weights['visibleGhostDistance'] = PARAMS['feat_visible_ghost_dist']
-      weights['capsuleDistance'] = PARAMS['feat_capsule_dist']
-      weights['escapeRoutes'] = PARAMS['feat_escape_routes']
-      weights['deadEndFlag'] = PARAMS['feat_dead_end_flag']
-      weights['tripDeadline'] = PARAMS['feat_trip_deadline']
-    else:
-      weights['invaderDistance'] = PARAMS['defense_invader_chase']
-      weights['stayGhost'] = PARAMS['defense_stay_ghost_bonus']
-      weights['becamePacman'] = PARAMS['defense_become_pacman_penalty']
-      weights['scaredContact'] = PARAMS['defense_scared_contact_penalty']
-      if mode == 'intercept':
-        weights['eventDistance'] = PARAMS['feat_intercept_event_dist']
+      if mode == 'attack':
+        score += 14.0 * (len(self.getFood(gameState).asList()) - len(self.getFood(successor).asList()))
+        score += 18.0 * (nextState.numReturned - currentState.numReturned)
+        score -= 10.0 * self.positionRisk(gameState, nextPos)
+        if nextPos in self.shared['enemy_positions']:
+          score -= 0.7 * self.shared['dead_end_depth'].get(nextPos, 0)
+        if currentState.numCarrying > 0:
+          score -= 0.7 * currentState.numCarrying * self.shared['home_distance'][nextPos]
+        if self.inOpeningPhase(gameState) and self.matchesPreferredLane(nextPos, self.preferredUpperLane()):
+          score += 1.5
+      elif mode == 'retreat':
+        score -= 2.5 * self.shared['home_distance'][nextPos]
+        score -= 12.0 * self.positionRisk(gameState, nextPos)
+        score += 24.0 * (nextState.numReturned - currentState.numReturned)
       else:
-        weights['eventDistance'] = PARAMS['feat_patrol_border_dist']
-    return weights
+        invaderPos = self.closestInvaderPosition(gameState)
+        if invaderPos is not None:
+          score -= 3.0 * self.getMazeDistance(nextPos, invaderPos)
+        if not nextState.isPacman:
+          score += 4.0
+        else:
+          score -= 10.0
+        if nextState.scaredTimer > 0 and invaderPos is not None and self.getMazeDistance(nextPos, invaderPos) <= 1:
+          score -= 10.0
 
-  def targetDistance(self, pos, target):
-    if pos is None or target is None:
-      return 0
-    return self.getMazeDistance(pos, target)
+      scores[action] = round(score, 6)
+    return scores
 
-  def nearestVisibleGhostDistance(self, gameState, pos):
-    ghostPos = self.closestVisibleDangerPosition(gameState, pos)
-    if ghostPos is None:
-      return 0
-    return min(8, self.getMazeDistance(pos, ghostPos))
+  # tactical local search  
 
-  def nearestCapsuleDistance(self, gameState, pos):
-    capsules = self.getCapsules(gameState)
-    if not capsules:
-      return 0
-    return min(self.getMazeDistance(pos, capsule) for capsule in capsules)
-
-  def countSafeNeighbors(self, gameState, pos):
-    count = 0
-    for neighbor in self.shared['neighbors'].get(pos, []):
-      if self.positionRisk(gameState, neighbor) <= 0.6:
-        count += 1
-    return count
-
-  def tripDeadlinePressure(self, ownMovesLeft, homeDistance, carrying):
-    if carrying <= 0:
-      return 0
-    slack = ownMovesLeft - (homeDistance + 2)
-    if slack >= 0:
-      return 0
-    return -slack
-
-  ##########################
-  # Tactical local search  #
-  ##########################
-
+  # checks if an enemy is really close and we need to think deeper
   def shouldUseTacticalSearch(self, gameState, mode):
     if mode not in ('attack', 'retreat', 'intercept'):
       return False
-    closeEnemies = self.getTacticalEnemies(gameState)
-    if len(closeEnemies) != 1:
-      return False
-    if mode == 'attack':
-      myState = gameState.getAgentState(self.index)
-      enemyState = gameState.getAgentState(closeEnemies[0])
-      return myState.isPacman or myState.numCarrying > 0 or enemyState.isPacman
-    return True
-
-  def getTacticalEnemies(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
-    closeEnemies = []
     for enemy in self.getOpponents(gameState):
       enemyPos = gameState.getAgentPosition(enemy)
       if enemyPos is None:
         continue
-      if self.getMazeDistance(myPos, enemyPos) <= PARAMS['tactical_trigger_radius']:
-        closeEnemies.append(enemy)
-    return closeEnemies
+      if self.getMazeDistance(myPos, enemyPos) <= 5:
+        return True
+    return False
 
-  def applyTacticalSearch(self, gameState, actionScores, actionDetails, mode, target):
-    visibleEnemies = self.getTacticalEnemies(gameState)
-    if len(visibleEnemies) != 1:
-      return actionScores, actionDetails
+  # simulates enemy moves to avoid getting eaten in close combat
+  def applyTacticalSearch(self, gameState, actionScores, mode, target):
+    visibleEnemies = []
+    myPos = gameState.getAgentPosition(self.index)
+    for enemy in self.getOpponents(gameState):
+      enemyPos = gameState.getAgentPosition(enemy)
+      if enemyPos is None:
+        continue
+      if self.getMazeDistance(myPos, enemyPos) <= 5:
+        visibleEnemies.append(enemy)
 
-    enemy = visibleEnemies[0]
-    bestCandidates = sorted(actionScores.items(), key=lambda item: item[1], reverse=True)[:PARAMS['tactical_top_n']]
+    if not visibleEnemies:
+      return actionScores
+
+    enemy = min(visibleEnemies, key=lambda idx: self.getMazeDistance(myPos, gameState.getAgentPosition(idx)))
+    bestCandidates = sorted(actionScores.items(), key=lambda item: item[1], reverse=True)[:4]
     rescored = dict(actionScores)
 
     for action, baseScore in bestCandidates:
@@ -1092,45 +795,34 @@ class HybridCaptureAgent(CaptureAgent):
       for enemyAction in enemyActions:
         replyState = successor.generateSuccessor(enemy, enemyAction)
         replyValues.append(self.tacticalStateValue(replyState, mode, target))
-      replyValues.sort()
-      blendCount = min(len(replyValues), PARAMS['tactical_reply_blend_top_k'])
-      cautiousReply = sum(replyValues[:blendCount]) / float(blendCount)
-      rescored[action] = round(
-        PARAMS['tactical_base_weight'] * baseScore + PARAMS['tactical_reply_weight'] * cautiousReply,
-        6,
-      )
+      rescored[action] = round(0.7 * baseScore + 0.3 * min(replyValues), 6)
+    return rescored
 
-    rescoredDetails = []
-    for detail in actionDetails:
-      updated = dict(detail)
-      updated['score'] = rescored[detail['action']]
-      rescoredDetails.append(updated)
-    return rescored, rescoredDetails
-
+  # quickly scores a board state during close combat
   def tacticalStateValue(self, gameState, mode, target):
     myState = gameState.getAgentState(self.index)
     myPos = gameState.getAgentPosition(self.index)
     if myPos is None:
       myPos = myState.getPosition()
 
-    value = self.getScore(gameState) * PARAMS['tac_score_mult']
-    value += PARAMS['tac_risk_mult'] * self.positionRisk(gameState, myPos)
+    value = self.getScore(gameState) * 20.0
+    value -= 7.0 * self.positionRisk(gameState, myPos)
 
     if mode in ('attack', 'retreat'):
-      value += PARAMS['tac_carry_home_mult'] * self.shared['home_distance'].get(myPos, 0) * max(1, myState.numCarrying)
+      value -= 1.5 * self.shared['home_distance'].get(myPos, 0) * max(1, myState.numCarrying)
     else:
       invaderPos = self.closestInvaderPosition(gameState)
       if invaderPos is not None:
-        value += PARAMS['tac_invader_dist_mult'] * self.getMazeDistance(myPos, invaderPos)
+        value -= 2.5 * self.getMazeDistance(myPos, invaderPos)
 
     if target is not None:
-      value += PARAMS['tac_target_dist_mult'] * self.getMazeDistance(myPos, target)
+      value -= 0.4 * self.getMazeDistance(myPos, target)
     return value
 
-  ##############################
-  # Geometry and map utilities #
-  ##############################
 
+  # map utilities 
+
+  # checks if a tile is on our side of the map
   def isHomePosition(self, pos, width=None):
     width = self.shared['width'] if width is None else width
     halfway = width // 2
@@ -1138,6 +830,7 @@ class HybridCaptureAgent(CaptureAgent):
       return pos[0] < halfway
     return pos[0] >= halfway
 
+  # finds the midline tiles where we can score food
   def computeBorderCells(self, legalPositions, width):
     halfway = width // 2
     borderX = halfway - 1 if self.red else halfway
@@ -1152,6 +845,7 @@ class HybridCaptureAgent(CaptureAgent):
         border.append(pos)
     return border
 
+  # finds good spots to stand to protect our remaining food
   def computePatrolPoints(self, gameState, homeBorder):
     defendedFood = self.getFoodYouAreDefending(gameState).asList()
     defendedCapsules = self.getCapsulesYouAreDefending(gameState)
@@ -1166,13 +860,14 @@ class HybridCaptureAgent(CaptureAgent):
     scored.sort()
     return [border for _, border in scored[:min(5, len(scored))]]
 
+  # figures out how deep every dead end is so we don't get trapped
   def computeDeadEndDepth(self, neighbors):
     degrees = {pos: len(nextPositions) for pos, nextPositions in neighbors.items()}
     depths = dict((pos, 0) for pos in neighbors)
-    queue = deque((pos, 1) for pos, degree in degrees.items() if degree <= 1)
+    queue = [(pos, 1) for pos, degree in degrees.items() if degree <= 1]
 
     while queue:
-      pos, depth = queue.popleft()
+      pos, depth = queue.pop(0)
       if degrees[pos] == 0:
         continue
       depths[pos] = max(depths[pos], depth)
@@ -1185,6 +880,7 @@ class HybridCaptureAgent(CaptureAgent):
           queue.append((neighbor, depth + 1))
     return depths
 
+  # gets adjacent tiles that aren't walls
   def getStaticNeighbors(self, pos, walls):
     neighbors = []
     x, y = pos
@@ -1207,10 +903,10 @@ class HybridCaptureAgent(CaptureAgent):
       return Directions.SOUTH
     return Directions.STOP
 
-  ##############################
-  # Risk, pressure, heuristics #
-  ##############################
+  
+  # risk, pressure, heuristics #
 
+  # calculates how dangerous a spot is based on where enemies might be
   def positionRisk(self, gameState, pos):
     risk = 0.0
     for enemy in self.getOpponents(gameState):
@@ -1222,27 +918,29 @@ class HybridCaptureAgent(CaptureAgent):
       if enemyPos is not None:
         distance = self.getMazeDistance(pos, enemyPos)
         if distance <= 1:
-          risk += PARAMS['risk_visible_dist1']
+          risk += 3.5
         elif distance <= 2:
-          risk += PARAMS['risk_visible_dist2']
+          risk += 2.0
         elif distance <= 4:
-          risk += PARAMS['risk_visible_dist4']
+          risk += 0.8
         continue
 
-      hotspots = self.shared['belief_hotspots'].get(enemy, [])
-      if not hotspots:
+      belief = self.shared['beliefs'][enemy]
+      if belief.totalCount() == 0:
         continue
 
-      for beliefPos, beliefProb in hotspots:
-        if beliefProb < PARAMS['risk_min_confidence']:
-          continue
-        distance = self.getMazeDistance(pos, beliefPos)
-        if distance <= 1:
-          risk += PARAMS['risk_belief_dist1'] * beliefProb
-        elif distance <= 2:
-          risk += PARAMS['risk_belief_dist2'] * beliefProb
-        elif distance <= 4:
-          risk += PARAMS['risk_belief_dist4'] * beliefProb
+      beliefPos = belief.argMax()
+      peakProb = belief[beliefPos]
+      if peakProb < 0.2:
+        continue
+
+      distance = self.getMazeDistance(pos, beliefPos)
+      if distance <= 1:
+        risk += 2.0 * peakProb
+      elif distance <= 2:
+        risk += 1.0 * peakProb
+      elif distance <= 4:
+        risk += 0.4 * peakProb
     return risk
 
   def closestDangerDistance(self, gameState, pos):
@@ -1281,6 +979,7 @@ class HybridCaptureAgent(CaptureAgent):
       return None
     return min(visibleGhosts, key=lambda ghostPos: self.getMazeDistance(pos, ghostPos))
 
+  # finds the most dangerous enemy we need to deal with
   def primaryThreatTarget(self, gameState):
     visibleInvaders = []
     for enemy in self.getOpponents(gameState):
@@ -1303,6 +1002,7 @@ class HybridCaptureAgent(CaptureAgent):
       return max(self.shared['recent_events'], key=lambda event: event['ttl'])['pos']
     return None
 
+  # finds the nearest enemy pacman
   def closestInvaderPosition(self, gameState):
     myPos = gameState.getAgentPosition(self.index)
     candidates = []
@@ -1321,6 +1021,7 @@ class HybridCaptureAgent(CaptureAgent):
       return None
     return min(candidates, key=lambda pos: self.getMazeDistance(myPos, pos))
 
+  # checks if the enemies are still scared of our power capsule
   def maxEnemyScaredTimer(self, gameState):
     timers = [gameState.getAgentState(enemy).scaredTimer for enemy in self.getOpponents(gameState)]
     if not timers:
@@ -1336,57 +1037,58 @@ class HybridCaptureAgent(CaptureAgent):
       pressure += 2.5 / (1 + min(self.getMazeDistance(borderPos, food) for food in defendedFood))
     return pressure
 
-  #########################
-  # Debug / bookkeeping   #
-  #########################
+  def computeFoodClusterSizes(self, food):
+    if not food:
+      return {}
+    remaining = set(food)
+    clusterSizes = {}
 
-  def recordDecision(self, gameState, mode, target, action, actionScores, actionDetails=None, messages=None):
+    while remaining:
+      seed = remaining.pop()
+      cluster = [seed]
+      frontier = [seed]
+
+      while frontier:
+        current = frontier.pop()
+        connected = [other for other in list(remaining) if self.getMazeDistance(current, other) <= 4]
+        for other in connected:
+          remaining.remove(other)
+          frontier.append(other)
+          cluster.append(other)
+
+      size = len(cluster)
+      for pellet in cluster:
+        clusterSizes[pellet] = size
+    return clusterSizes
+
+  # saving info 
+
+  # saves info about why we made this move for debugging
+  def recordDecision(self, gameState, mode, target, action, actionScores):
     topBeliefs = {}
     for enemy in self.getOpponents(gameState):
-      hotspots = self.shared['belief_hotspots'].get(enemy, [])
-      if hotspots:
-        pos, prob = hotspots[0]
-        topBeliefs[str(enemy)] = (pos, round(prob, 3))
+      belief = self.shared['beliefs'][enemy]
+      if belief.totalCount() > 0:
+        pos = belief.argMax()
+        topBeliefs[str(enemy)] = (pos, round(belief[pos], 3))
 
-    ranked = []
-    if actionDetails:
-      ranked = sorted(actionDetails, key=lambda item: (-item['score'], item['action']))
-    elif actionScores:
-      ranked = [
-        {'action': item[0], 'score': item[1], 'features': {}, 'weights': {}}
-        for item in sorted(actionScores.items(), key=lambda item: (-item[1], item[0]))
-      ]
-
-    bestActions = []
-    bestScore = 0
-    if actionScores:
-      bestScore = max(actionScores.values())
-      bestActions = sorted([item for item, score in actionScores.items() if score == bestScore])
-
-    selected = None
-    for detail in ranked:
-      if detail['action'] == action:
-        selected = detail
-        break
-    if selected is None:
-      selected = {'action': action, 'score': actionScores.get(action, 0) if actionScores else 0, 'features': {}, 'weights': {}}
-
+    ranked = sorted(actionScores.items(), key=lambda item: item[1], reverse=True)[:4]
     self.lastDecisionInfo = {
       'mode': mode,
-      'chosenAction': action,
-      'bestActions': bestActions,
-      'bestScore': bestScore,
-      'selectedAction': selected,
-      'scoredActions': ranked[:4],
       'target': target,
+      'action': action,
       'beliefs': topBeliefs,
+      'scores': ranked,
       'events': list(self.shared['recent_events']),
-      'messages': messages or [],
     }
 
   def ownMovesLeft(self, gameState):
     numAgents = max(1, gameState.getNumAgents())
     return (gameState.data.timeleft + numAgents - 1) // numAgents
+
+  def ownTotalMoves(self):
+    contestLength = self.shared.get('contest_length', 0)
+    return max(1, contestLength // max(1, len(self.getTeam(self.getCurrentObservation() or self.getPreviousObservation())) + len(self.getOpponents(self.getCurrentObservation() or self.getPreviousObservation()))))
 
   def inOpeningPhase(self, gameState):
     totalOwnMoves = max(1, self.shared.get('contest_length', gameState.data.timeleft) // max(1, gameState.getNumAgents()))
@@ -1410,54 +1112,3 @@ class HybridCaptureAgent(CaptureAgent):
     if preferredUpper:
       return pos[1] >= midY
     return pos[1] < midY
-
-  def _logTurnData(self, gameState, mode, action, actionScores, actionDetails=None):
-    """Log per-turn state data when PACMAN_LOG env var is set."""
-    if not os.environ.get('PACMAN_LOG'):
-      return
-    try:
-      myState = gameState.getAgentState(self.index)
-      myPos = myState.getPosition()
-      if myPos is None:
-        return
-
-      row = {
-        'agent': self.index,
-        'turn': self.shared.get('updates', 0),
-        'mode': mode,
-        'action': action,
-        'score': self.getScore(gameState),
-        'carrying': myState.numCarrying,
-        'returned': myState.numReturned,
-        'isPacman': int(myState.isPacman),
-        'posX': myPos[0],
-        'posY': myPos[1],
-        'homeDist': self.shared['home_distance'].get(myPos, 0),
-        'foodLeft': len(self.getFood(gameState).asList()),
-        'foodDefending': len(self.getFoodYouAreDefending(gameState).asList()),
-        'movesLeft': self.ownMovesLeft(gameState),
-        'positionRisk': round(self.positionRisk(gameState, myPos), 3),
-        'bestActionScore': max(actionScores.values()) if actionScores else 0,
-        'numActions': len(actionScores),
-      }
-
-      # Add visible enemy info
-      threatDist = self.closestVisibleDangerDistance(gameState, myPos)
-      row['visibleThreatDist'] = threatDist if threatDist is not None else -1
-      invaderPos = self.closestInvaderPosition(gameState)
-      row['invaderDist'] = self.getMazeDistance(myPos, invaderPos) if invaderPos else -1
-
-      if actionDetails:
-        for detail in actionDetails:
-          if detail['action'] == action:
-            for k, v in detail.get('features', {}).items():
-              row[f'feat_{k}'] = v
-            break
-
-      logDir = os.environ.get('PACMAN_LOG_DIR', '.')
-      logFilename = os.environ.get('PACMAN_LOG', 'game_log.jsonl')
-      logFile = os.path.join(logDir, logFilename)
-      with open(logFile, 'a') as f:
-        f.write(json.dumps(row) + '\n')
-    except Exception:
-      pass
